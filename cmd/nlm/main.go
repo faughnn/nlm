@@ -4325,11 +4325,12 @@ func downloadAudioOverview(c *notebooklm.Client, notebookID string, filename str
 	// Download the audio
 	audioResult, err := c.DownloadAudioOverview(context.Background(), notebookID)
 	if err != nil {
-		return audioDownloadUnavailableError(notebookID, err)
-	}
-
-	// Save to file
-	if err := audioResult.SaveAudioToFile(filename); err != nil {
+		// The direct fetch carries only the stored cookies, which the media
+		// CDN redirects to sign-in; retry inside nlm's signed-in browser.
+		if _, browserErr := downloadAudioWithOwnedBrowser(c, notebookID, filename); browserErr != nil {
+			return audioDownloadUnavailableError(notebookID, fmt.Errorf("%w; browser download: %v", err, browserErr))
+		}
+	} else if err := audioResult.SaveAudioToFile(filename); err != nil {
 		return fmt.Errorf("save audio file: %w", err)
 	}
 

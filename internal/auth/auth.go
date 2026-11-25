@@ -572,39 +572,7 @@ func (ba *BrowserAuth) GetAuth(opts ...Option) (token, cookies string, err error
 		}
 	}
 
-	// Use chromedp.ExecAllocator approach with minimal automation flags
-	chromeOpts := []chromedp.ExecAllocatorOption{
-		chromedp.NoFirstRun,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.UserDataDir(userDataDir),
-		chromedp.Flag("headless", !ba.debug && !o.InteractiveLogin),
-		chromedp.Flag("window-size", "1280,800"),
-		chromedp.Flag("new-window", true),
-		chromedp.Flag("no-first-run", true),
-		chromedp.Flag("disable-default-apps", true),
-		chromedp.Flag("remote-debugging-port", debugPort),
-
-		// Use the appropriate browser executable for this profile type
-		chromedp.ExecPath(browserPath),
-	}
-
-	if o.UserDataDir != "" {
-		// Chromium's default crash directory ignores --user-data-dir.
-		// Keep crash reporting out of the user's personal browser profile too.
-		chromeOpts = append(chromeOpts, chromedp.Flag("breakpad-dump-location", filepath.Join(userDataDir, "Crashpad")))
-		// The owned profile does not use another browser's encryption key.
-		// Avoid a system keychain prompt before the browser can start CDP.
-		chromeOpts = append(chromeOpts, chromedp.Flag("use-mock-keychain", true))
-	}
-
-	// The login process must not try to update the installed browser under
-	// nlm's TCC identity. This flag affects only this Brave invocation.
-	chromeOpts = append(chromeOpts, chromedp.Flag("disable-brave-update", true))
-	if runtime.GOOS == "darwin" {
-		// Chromium clones its application bundle to survive an in-place update.
-		// A short-lived login browser does not need that update helper.
-		chromeOpts = append(chromeOpts, chromedp.Flag("disable-features", "MacAppCodeSignClone"))
-	}
+	chromeOpts := browserExecOptions(browserPath, userDataDir, o.UserDataDir != "", !ba.debug && !o.InteractiveLogin, debugPort)
 
 	ba.debugf("launching %s", browserPath)
 	if ba.debug {
@@ -624,6 +592,48 @@ func (ba *BrowserAuth) GetAuth(opts ...Option) (token, cookies string, err error
 	defer cancel()
 
 	return ba.extractAuthDataForURL(ctx, o.TargetURL)
+}
+
+// browserExecOptions returns the launch options for a browser that nlm
+// drives. owned marks nlm's own persistent profile directory. Anything that
+// later reopens an owned profile must launch with these same options: the
+// profile's saved session is encrypted under the mock keychain, so a browser
+// started without it cannot read the session the login wrote.
+func browserExecOptions(browserPath, userDataDir string, owned, headless bool, debugPort string) []chromedp.ExecAllocatorOption {
+	// Use chromedp.ExecAllocator approach with minimal automation flags
+	chromeOpts := []chromedp.ExecAllocatorOption{
+		chromedp.NoFirstRun,
+		chromedp.NoDefaultBrowserCheck,
+		chromedp.UserDataDir(userDataDir),
+		chromedp.Flag("headless", headless),
+		chromedp.Flag("window-size", "1280,800"),
+		chromedp.Flag("new-window", true),
+		chromedp.Flag("no-first-run", true),
+		chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("remote-debugging-port", debugPort),
+
+		// Use the appropriate browser executable for this profile type
+		chromedp.ExecPath(browserPath),
+	}
+
+	if owned {
+		// Chromium's default crash directory ignores --user-data-dir.
+		// Keep crash reporting out of the user's personal browser profile too.
+		chromeOpts = append(chromeOpts, chromedp.Flag("breakpad-dump-location", filepath.Join(userDataDir, "Crashpad")))
+		// The owned profile does not use another browser's encryption key.
+		// Avoid a system keychain prompt before the browser can start CDP.
+		chromeOpts = append(chromeOpts, chromedp.Flag("use-mock-keychain", true))
+	}
+
+	// The login process must not try to update the installed browser under
+	// nlm's TCC identity. This flag affects only this Brave invocation.
+	chromeOpts = append(chromeOpts, chromedp.Flag("disable-brave-update", true))
+	if runtime.GOOS == "darwin" {
+		// Chromium clones its application bundle to survive an in-place update.
+		// A short-lived login browser does not need that update helper.
+		chromeOpts = append(chromeOpts, chromedp.Flag("disable-features", "MacAppCodeSignClone"))
+	}
+	return chromeOpts
 }
 
 // copyProfileData first resolves the profile name to a path and then calls copyProfileDataFromPath

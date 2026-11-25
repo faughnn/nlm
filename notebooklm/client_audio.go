@@ -534,6 +534,38 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 		return audioOverview, nil
 	}
 
+	audioID, title, audioURL, err := c.audioOverviewDownloadURL(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Download the audio from the URL
+	audioData, err := c.downloadAudioFromURL(ctx, audioURL)
+	if err != nil {
+		return nil, fmt.Errorf("download audio from URL: %w", err)
+	}
+
+	result := &AudioOverviewResult{
+		ProjectID: projectID,
+		AudioID:   audioID,
+		Title:     title,
+		AudioData: base64.StdEncoding.EncodeToString(audioData),
+		IsReady:   true,
+	}
+
+	return result, nil
+}
+
+// AudioOverviewDownloadURL returns the signed URL of the notebook's newest
+// audio overview, for callers that fetch the file themselves.
+func (c *Client) AudioOverviewDownloadURL(ctx context.Context, projectID string) (string, error) {
+	_, _, audioURL, err := c.audioOverviewDownloadURL(ctx, projectID)
+	return audioURL, err
+}
+
+// audioOverviewDownloadURL finds the notebook's newest audio overview and
+// picks the URL to download it from.
+func (c *Client) audioOverviewDownloadURL(ctx context.Context, projectID string) (audioID, title, audioURL string, err error) {
 	// Query for audio artifacts using direct RPC (response format is complex)
 	resp, err := c.rpc.Do(ctx, rpc.Call{
 		ID: rpc.RPCListArtifacts, // Use gArtLc RPC
@@ -545,13 +577,13 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 		NotebookID: projectID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("query audio artifacts: %w", err)
+		return "", "", "", fmt.Errorf("query audio artifacts: %w", err)
 	}
 
 	// Parse response - RPC client already extracts and parses the nested JSON for us
 	var responseData []interface{}
 	if err := json.Unmarshal(resp, &responseData); err != nil {
-		return nil, fmt.Errorf("parse artifacts response: %w", err)
+		return "", "", "", fmt.Errorf("parse artifacts response: %w", err)
 	}
 
 	if c.config.Debug {
@@ -560,13 +592,13 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 
 	// Response is already parsed by RPC client: [[artifact1, artifact2, ...]]
 	if len(responseData) == 0 {
-		return nil, fmt.Errorf("no audio overview found for this notebook")
+		return "", "", "", fmt.Errorf("no audio overview found for this notebook")
 	}
 
 	// Get the artifacts array (first element)
 	artifacts, ok := responseData[0].([]interface{})
 	if !ok || len(artifacts) == 0 {
-		return nil, fmt.Errorf("no audio artifacts found")
+		return "", "", "", fmt.Errorf("no audio artifacts found")
 	}
 
 	if c.config.Debug {
@@ -576,7 +608,7 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 	// Get first artifact (most recent)
 	artifactData, ok := artifacts[0].([]interface{})
 	if !ok || len(artifactData) < 7 {
-		return nil, fmt.Errorf("invalid artifact data structure (need at least 7 elements, got %d)", len(artifactData))
+		return "", "", "", fmt.Errorf("invalid artifact data structure (need at least 7 elements, got %d)", len(artifactData))
 	}
 
 	if c.config.Debug {
@@ -632,20 +664,20 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 	// Extract fields from artifact
 	// Format: [audio_id, title, type, sources, state, ?, audio_overview, ...]
 	// audio_overview at index 6 contains: [?, ?, audio_url, video_url, ...]
-	audioID, _ := artifactData[0].(string)
-	title, _ := artifactData[1].(string)
+	audioID, _ = artifactData[0].(string)
+	title, _ = artifactData[1].(string)
 
 	// Get audio overview array at index 6
 	audioPayload, ok := artifactData[6].([]interface{})
 	if !ok || len(audioPayload) < 6 {
-		return nil, fmt.Errorf("audio overview data not found or incomplete (has %d elements, need at least 6)", len(audioPayload))
+		return "", "", "", fmt.Errorf("audio overview data not found or incomplete (has %d elements, need at least 6)", len(audioPayload))
 	}
 
 	// Audio URLs are in a nested array at audioOverview[5]
 	// Format: [[url1, type1, mime1], [url2, type2, mime2], ...]
 	audioURLList, ok := audioPayload[5].([]interface{})
 	if !ok || len(audioURLList) == 0 {
-		return nil, fmt.Errorf("audio URL list not found - audio may not be ready yet")
+		return "", "", "", fmt.Errorf("audio URL list not found - audio may not be ready yet")
 	}
 
 	if c.config.Debug {
@@ -654,7 +686,6 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 
 	// Try to find a URL that doesn't require authentication redirect
 	// Prefer URLs with =m140-dv or =m140 format (direct download formats)
-	var audioURL string
 	for i, urlData := range audioURLList {
 		if urlArr, ok := urlData.([]interface{}); ok && len(urlArr) > 0 {
 			if url, ok := urlArr[0].(string); ok && url != "" {
@@ -680,29 +711,14 @@ func (c *Client) DownloadAudioOverview(ctx context.Context, projectID string) (*
 	}
 
 	if audioURL == "" {
-		return nil, fmt.Errorf("audio URL not found in URL list")
+		return "", "", "", fmt.Errorf("audio URL not found in URL list")
 	}
 
 	if c.config.Debug {
 		fmt.Printf("Found audio: %s\n", title)
 		fmt.Printf("Downloading audio from: %s\n", audioURL)
 	}
-
-	// Download the audio from the URL
-	audioData, err := c.downloadAudioFromURL(ctx, audioURL)
-	if err != nil {
-		return nil, fmt.Errorf("download audio from URL: %w", err)
-	}
-
-	result := &AudioOverviewResult{
-		ProjectID: projectID,
-		AudioID:   audioID,
-		Title:     title,
-		AudioData: base64.StdEncoding.EncodeToString(audioData),
-		IsReady:   true,
-	}
-
-	return result, nil
+	return audioID, title, audioURL, nil
 }
 
 // downloadAudioFromURL downloads audio data from a googleusercontent URL
